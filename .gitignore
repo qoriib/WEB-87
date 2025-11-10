@@ -1,0 +1,31 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.py.class
+
+# Environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE/editor
+*.swp
+*.swo
+.DS_Store
+.vscode/
+.idea/
+
+# Flask/instance files
+instance/
+*.log
+
+# Local database
+chat.db
+
+# Coverage / testing
+.coverage
+htmlcov/
+
