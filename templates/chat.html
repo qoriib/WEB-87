@@ -1,27 +1,38 @@
 {% extends 'base.html' %}
 {% block content %}
-<div class="row justify-content-center">
+<div class="row g-4 chat-layout">
+  <div class="col-lg-4">
+    <div class="card shadow-sm user-panel h-100">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h2 class="h5 mb-0">Kontak</h2>
+        <button class="btn btn-sm btn-outline-secondary" id="refresh-users" type="button">Segarkan</button>
+      </div>
+      <div class="list-group list-group-flush flex-grow-1" id="user-list">
+        <div class="list-group-item text-muted text-center">Memuat pengguna...</div>
+      </div>
+    </div>
+  </div>
   <div class="col-lg-8">
-    <div class="card shadow-sm chat-panel active" id="chat-panel">
+    <div class="card shadow-sm chat-panel h-100" id="chat-panel">
       <div class="card-header d-flex justify-content-between align-items-center">
         <div>
-          <h3 class="h5 mb-0">Ruang Obrolan</h3>
-          <small class="text-muted">Semua pesan dibagikan ke seluruh pengguna yang login.</small>
+          <h3 class="h5 mb-0" id="chat-title">Pilih pengguna</h3>
+          <small class="text-muted" id="chat-subtitle">Klik salah satu kontak untuk memulai percakapan.</small>
         </div>
-        <span class="badge bg-success">online</span>
+        <span class="badge bg-secondary" id="chat-status">offline</span>
       </div>
       <div class="card-body d-flex flex-column">
         <div class="messages flex-grow-1 mb-3" id="messages"></div>
-        <form id="message-form" class="input-group">
+        <form id="message-form" class="input-group" autocomplete="off">
           <input
             id="message-input"
             type="text"
             class="form-control"
-            placeholder="Ketik pesan..."
-            autocomplete="off"
+            placeholder="Pilih pengguna terlebih dahulu"
+            disabled
             required
           />
-          <button type="submit" class="btn btn-success">Kirim</button>
+          <button type="submit" class="btn btn-success" disabled>Kirim</button>
         </form>
       </div>
     </div>
@@ -30,66 +41,159 @@
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <script>
   const socket = io();
-  const currentUser = {{ username|tojson }};
+  const currentUserId = {{ user_id|tojson }};
+
+  const userListEl = document.getElementById('user-list');
+  const refreshBtn = document.getElementById('refresh-users');
+  const chatTitle = document.getElementById('chat-title');
+  const chatSubtitle = document.getElementById('chat-subtitle');
+  const chatStatus = document.getElementById('chat-status');
+  const chatPanel = document.getElementById('chat-panel');
   const messagesEl = document.getElementById('messages');
   const messageForm = document.getElementById('message-form');
   const messageInput = document.getElementById('message-input');
+  const sendButton = messageForm.querySelector('button[type="submit"]');
 
-  const formatTime = (timestamp) =>
-    new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  let selectedUser = null;
+  let usersCache = [];
 
-  const renderMessage = (payload, type = 'message') => {
-    const row = document.createElement('div');
+  const formatTime = (timestamp) => {
+    const date = new Date(timestamp);
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
 
-    if (type === 'system') {
-      row.className = 'system-message text-center text-muted';
-      row.textContent = payload.message;
+  const setFormState = (enabled) => {
+    messageInput.disabled = !enabled;
+    sendButton.disabled = !enabled;
+    if (!enabled) {
+      messageInput.placeholder = 'Pilih pengguna terlebih dahulu';
     } else {
-      const isMe = payload.username === currentUser;
-      row.className = `message-row ${isMe ? 'me' : 'other'}`;
-
-      const bubble = document.createElement('div');
-      bubble.className = `message-bubble ${isMe ? 'me' : 'other'}`;
-
-      const meta = document.createElement('div');
-      meta.className = 'message-meta';
-      meta.textContent = `${payload.username} • ${formatTime(payload.timestamp)}`;
-
-      const body = document.createElement('div');
-      body.className = 'message-text';
-      body.textContent = payload.content;
-
-      bubble.append(meta, body);
-      row.appendChild(bubble);
+      messageInput.placeholder = 'Ketik pesan...';
+      messageInput.focus();
     }
+  };
 
+  const clearActiveUser = () => {
+    document.querySelectorAll('.user-item').forEach((item) => item.classList.remove('active'));
+  };
+
+  const markUserUnread = (userId) => {
+    const item = document.querySelector(`[data-user-id="${userId}"]`);
+    if (item && (!selectedUser || selectedUser.id !== userId)) {
+      item.classList.add('has-unread');
+    }
+  };
+
+  const renderMessage = (payload) => {
+    const row = document.createElement('div');
+    const isMe = payload.sender_id === currentUserId;
+    row.className = `message-row ${isMe ? 'me' : 'other'}`;
+
+    const bubble = document.createElement('div');
+    bubble.className = `message-bubble ${isMe ? 'me' : 'other'}`;
+
+    const meta = document.createElement('div');
+    meta.className = 'message-meta';
+    meta.textContent = `${payload.sender} • ${formatTime(payload.timestamp)}`;
+
+    const body = document.createElement('div');
+    body.className = 'message-text';
+    body.textContent = payload.content;
+
+    bubble.append(meta, body);
+    row.appendChild(bubble);
     messagesEl.appendChild(row);
     messagesEl.scrollTop = messagesEl.scrollHeight;
   };
 
-  const loadHistory = async () => {
+  const loadConversation = async (userId) => {
     messagesEl.innerHTML = '';
-    const res = await fetch('/messages');
+    const res = await fetch(`/messages/${userId}`);
+    if (!res.ok) {
+      chatSubtitle.textContent = 'Gagal memuat percakapan';
+      return;
+    }
     const history = await res.json();
-    history.forEach((item) => renderMessage(item));
+    history.forEach(renderMessage);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  };
+
+  const selectUser = (user) => {
+    selectedUser = user;
+    clearActiveUser();
+    const item = document.querySelector(`[data-user-id="${user.id}"]`);
+    if (item) {
+      item.classList.add('active');
+      item.classList.remove('has-unread');
+    }
+    chatTitle.textContent = user.username;
+    chatSubtitle.textContent = 'Percakapan privat';
+    chatStatus.textContent = 'online';
+    chatStatus.className = 'badge bg-success';
+    chatPanel.classList.add('active');
+    setFormState(true);
+    loadConversation(user.id);
+  };
+
+  const renderUserList = (users) => {
+    userListEl.innerHTML = '';
+    if (!users.length) {
+      userListEl.innerHTML = '<div class="list-group-item text-muted text-center">Belum ada pengguna lain.</div>';
+      chatTitle.textContent = 'Tidak ada pengguna lain';
+      chatSubtitle.textContent = 'Ajak teman Anda untuk bergabung.';
+      setFormState(false);
+      return;
+    }
+    users.forEach((user) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'list-group-item list-group-item-action user-item text-start';
+      button.dataset.userId = user.id;
+      button.innerHTML = `
+        <div class="d-flex justify-content-between align-items-center">
+          <strong>${user.username}</strong>
+          <span class="status-dot"></span>
+        </div>`;
+      button.addEventListener('click', () => selectUser(user));
+      userListEl.appendChild(button);
+    });
+  };
+
+  const fetchUsers = async () => {
+    userListEl.innerHTML = '<div class="list-group-item text-muted text-center">Memuat pengguna...</div>';
+    const res = await fetch('/users');
+    if (!res.ok) {
+      userListEl.innerHTML = '<div class="list-group-item text-danger text-center">Gagal memuat pengguna.</div>';
+      return;
+    }
+    usersCache = await res.json();
+    renderUserList(usersCache);
   };
 
   messageForm.addEventListener('submit', (event) => {
     event.preventDefault();
+    if (!selectedUser) return;
     const message = messageInput.value.trim();
     if (!message) return;
-    socket.emit('send_message', { message });
+    socket.emit('send_message', { message, to: selectedUser.id });
     messageInput.value = '';
   });
 
+  refreshBtn.addEventListener('click', fetchUsers);
+
   socket.on('new_message', (payload) => {
-    renderMessage(payload);
+    const otherUserId = payload.sender_id === currentUserId ? payload.receiver_id : payload.sender_id;
+    if (selectedUser && selectedUser.id === otherUserId) {
+      renderMessage(payload);
+    } else {
+      markUserUnread(otherUserId);
+    }
   });
 
   socket.on('system', (payload) => {
-    renderMessage(payload, 'system');
+    chatSubtitle.textContent = payload.message;
   });
 
-  loadHistory();
+  fetchUsers();
 </script>
 {% endblock %}

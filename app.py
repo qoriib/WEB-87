@@ -13,13 +13,15 @@ from flask import (
     url_for,
 )
 from flask_sqlalchemy import SQLAlchemy
-from flask_socketio import SocketIO, emit
-from sqlalchemy import inspect, text
+from flask_socketio import SocketIO, emit, join_room
+from sqlalchemy import and_, inspect, or_, text
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-DB_PATH = os.path.join(BASE_DIR, "chat.db")
+INSTANCE_DIR = os.path.join(BASE_DIR, "instance")
+os.makedirs(INSTANCE_DIR, exist_ok=True)
+DB_PATH = os.path.join(INSTANCE_DIR, "chat.db")
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
@@ -52,10 +54,15 @@ class User(db.Model):
 
 class Message(db.Model):
     id = db.Column(db.Integer, primary_key=True)
+    sender_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    receiver_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     content = db.Column(db.Text, nullable=False)
     timestamp = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
-    username = db.Column(db.String(80), nullable=False)
-    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+
+    sender = db.relationship("User", foreign_keys=[sender_id], backref="sent_messages")
+    receiver = db.relationship(
+        "User", foreign_keys=[receiver_id], backref="received_messages"
+    )
 
 
 def init_db() -> None:
@@ -79,7 +86,8 @@ def migrate_message_table() -> None:
     if "message" not in inspector.get_table_names():
         return
     columns = [col["name"] for col in inspector.get_columns("message")]
-    if "room" not in columns:
+    desired = {"id", "sender_id", "receiver_id", "content", "timestamp"}
+    if set(columns) == desired:
         return
     with db.engine.begin() as conn:
         conn.execute(text("ALTER TABLE message RENAME TO message_old"))
@@ -88,26 +96,16 @@ def migrate_message_table() -> None:
                 """
                 CREATE TABLE message (
                     id INTEGER PRIMARY KEY,
+                    sender_id INTEGER NOT NULL REFERENCES user (id),
+                    receiver_id INTEGER NOT NULL REFERENCES user (id),
                     content TEXT NOT NULL,
-                    timestamp DATETIME NOT NULL,
-                    username VARCHAR(80) NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    FOREIGN KEY(user_id) REFERENCES user (id)
+                    timestamp DATETIME NOT NULL
                 )
                 """
             )
         )
-        conn.execute(
-            text(
-                """
-                INSERT INTO message (id, content, timestamp, username, user_id)
-                SELECT id, content, timestamp, username, user_id
-                FROM message_old
-                """
-            )
-        )
         conn.execute(text("DROP TABLE message_old"))
-    logging.info("Migrated message table to remove unused room column.")
+    logging.info("Message table schema reset for private chat support.")
 
 
 def login_required(view_func):
@@ -185,82 +183,125 @@ def logout():
 @app.route("/chat")
 @login_required
 def chat():
-    return render_template("chat.html", username=session.get("username"))
+    return render_template(
+        "chat.html", username=session.get("username"), user_id=session.get("user_id")
+    )
 
 
-@app.get("/messages")
+@app.get("/users")
 @login_required
-def fetch_messages():
-    messages = Message.query.order_by(Message.timestamp.asc()).limit(100).all()
+def list_users():
+    me_id = session.get("user_id")
+    users = (
+        User.query.filter(User.id != me_id)
+        .order_by(User.username.asc())
+        .with_entities(User.id, User.username)
+        .all()
+    )
+    return jsonify([{"id": uid, "username": uname} for uid, uname in users])
+
+
+@app.get("/messages/<int:other_user_id>")
+@login_required
+def fetch_private_messages(other_user_id: int):
+    me_id = session.get("user_id")
+    if other_user_id == me_id:
+        return jsonify([])
+
+    other_user = User.query.get(other_user_id)
+    if not other_user:
+        return jsonify([]), 404
+
+    messages = (
+        Message.query.filter(
+            or_(
+                and_(
+                    Message.sender_id == me_id, Message.receiver_id == other_user_id
+                ),
+                and_(
+                    Message.sender_id == other_user_id, Message.receiver_id == me_id
+                ),
+            )
+        )
+        .order_by(Message.timestamp.asc())
+        .limit(200)
+        .all()
+    )
+
     payload = [
         {
             "id": msg.id,
-            "username": msg.username,
+            "sender_id": msg.sender_id,
+            "receiver_id": msg.receiver_id,
+            "sender": msg.sender.username,
+            "receiver": msg.receiver.username,
             "content": msg.content,
             "timestamp": msg.timestamp.isoformat(),
         }
         for msg in messages
     ]
-    logging.info("Messages requested (global chat).")
     return jsonify(payload)
 
 
 @socketio.on("connect")
 def handle_connect():
     username = session.get("username")
-    if not username:
+    user_id = session.get("user_id")
+    if not username or not user_id:
         logging.warning("Unauthorized socket connection attempt.")
         return False
+    join_room(f"user:{user_id}")
     logging.info("%s connected to chat", username)
     emit(
         "system",
-        {
-            "message": f"{username} bergabung ke chat.",
-            "timestamp": utcnow().isoformat(),
-        },
-        broadcast=True,
+        {"message": "Terhubung ke server chat.", "timestamp": utcnow().isoformat()},
+        to=f"user:{user_id}",
     )
 
 
 @socketio.on("disconnect")
 def handle_disconnect():
     username = session.get("username")
-    if not username:
-        return
-    logging.info("%s disconnected from chat", username)
-    emit(
-        "system",
-        {
-            "message": f"{username} meninggalkan chat.",
-            "timestamp": utcnow().isoformat(),
-        },
-        broadcast=True,
-    )
+    if username:
+        logging.info("%s disconnected from chat", username)
 
 
 @socketio.on("send_message")
 def handle_send_message(data):
     content = data.get("message", "").strip()
+    target_id = data.get("to")
     username = session.get("username")
     user_id = session.get("user_id")
 
-    if not content or not username or not user_id:
+    if not content or not username or not user_id or not target_id:
         return
 
-    message = Message(content=content, username=username, user_id=user_id)
+    if user_id == target_id:
+        return
+
+    target_user = User.query.get(target_id)
+    if not target_user:
+        return
+
+    message = Message(
+        sender_id=user_id, receiver_id=target_id, content=content
+    )
     db.session.add(message)
     db.session.commit()
-    logging.info("%s sent message", username)
+    logging.info("%s sent message to %s", username, target_user.username)
 
-    emit(
-        "new_message",
-        {
-            "username": username,
-            "content": content,
-            "timestamp": message.timestamp.isoformat(),
-        },
-        broadcast=True,
-    )
+    payload = {
+        "id": message.id,
+        "sender_id": user_id,
+        "receiver_id": target_id,
+        "sender": username,
+        "receiver": target_user.username,
+        "content": content,
+        "timestamp": message.timestamp.isoformat(),
+    }
+
+    emit("new_message", payload, to=f"user:{user_id}")
+    emit("new_message", payload, to=f"user:{target_id}")
 
 
 if __name__ == "__main__":
