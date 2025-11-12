@@ -261,8 +261,9 @@ def fetch_private_messages(other_user_id: int):
         .all()
     )
 
-    payload = [
-        {
+    payload = []
+    for msg in messages:
+        entry = {
             "id": msg.id,
             "sender_id": msg.sender_id,
             "receiver_id": msg.receiver_id,
@@ -271,8 +272,9 @@ def fetch_private_messages(other_user_id: int):
             "content": decrypt_message(msg.content),
             "timestamp": msg.timestamp.isoformat(),
         }
-        for msg in messages
-    ]
+        if msg.sender_id == me_id:
+            entry["ciphertext"] = msg.content
+        payload.append(entry)
     return jsonify(payload)
 
 
@@ -334,7 +336,8 @@ def handle_send_message(data):
         "timestamp": message.timestamp.isoformat(),
     }
 
-    emit("new_message", payload, to=f"user:{user_id}")
+    sender_payload = payload | {"ciphertext": message.content}
+    emit("new_message", sender_payload, to=f"user:{user_id}")
     emit("new_message", payload, to=f"user:{target_id}")
 
 

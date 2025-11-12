@@ -98,6 +98,14 @@ body {
   word-break: break-word;
 }
 
+.message-cipher {
+  margin-top: 0.35rem;
+  font-size: 0.7rem;
+  font-family: 'Roboto Mono', 'SFMono-Regular', Menlo, monospace;
+  opacity: 0.75;
+  word-break: break-all;
+}
+
 .system-message {
   font-size: 0.8rem;
 }

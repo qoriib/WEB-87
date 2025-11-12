@@ -100,7 +100,12 @@
     body.className = 'message-text';
     body.textContent = payload.content;
 
-    bubble.append(meta, body);
+    const cipher = document.createElement('div');
+    cipher.className = 'message-cipher';
+    cipher.textContent = payload.ciphertext || '';
+    cipher.classList.toggle('d-none', !payload.ciphertext);
+
+    bubble.append(meta, body, cipher);
     row.appendChild(bubble);
     messagesEl.appendChild(row);
     messagesEl.scrollTop = messagesEl.scrollHeight;
