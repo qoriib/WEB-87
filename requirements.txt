@@ -4,3 +4,4 @@ Flask-SQLAlchemy
 python-socketio
 python-engineio
 eventlet
+cryptography

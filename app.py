@@ -1,7 +1,10 @@
-from datetime import UTC, datetime
+from datetime import datetime
 from functools import wraps
+import base64
+import hashlib
 import logging
 import os
+from zoneinfo import ZoneInfo
 
 from flask import (
     Flask,
@@ -16,6 +19,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_socketio import SocketIO, emit, join_room
 from sqlalchemy import and_, inspect, or_, text
 from werkzeug.security import check_password_hash, generate_password_hash
+from cryptography.fernet import Fernet, InvalidToken
 
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -34,13 +38,42 @@ app.config.update(
     SQLALCHEMY_DATABASE_URI=f"sqlite:///{DB_PATH}",
     SQLALCHEMY_TRACK_MODIFICATIONS=False,
 )
+app.config["FERNET_KEY"] = os.environ.get("FERNET_KEY")
 
 db = SQLAlchemy(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
+WIB = ZoneInfo("Asia/Jakarta")
 
-def utcnow() -> datetime:
-    return datetime.now(UTC)
+
+def now_wib() -> datetime:
+    return datetime.now(WIB)
+
+
+def _get_fernet_key() -> bytes:
+    key = app.config.get("FERNET_KEY")
+    if key:
+        return key.encode()
+    derived = hashlib.sha256(app.secret_key.encode()).digest()
+    encoded = base64.urlsafe_b64encode(derived)
+    app.config["FERNET_KEY"] = encoded.decode()
+    return encoded
+
+
+def _cipher() -> Fernet:
+    return Fernet(_get_fernet_key())
+
+
+def encrypt_message(value: str) -> str:
+    return _cipher().encrypt(value.encode()).decode()
+
+
+def decrypt_message(value: str) -> str:
+    try:
+        return _cipher().decrypt(value.encode()).decode()
+    except InvalidToken:
+        logging.warning("Failed to decrypt message; returning raw content.")
+        return value
 
 
 class User(db.Model):
@@ -57,7 +90,7 @@ class Message(db.Model):
     sender_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     receiver_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     content = db.Column(db.Text, nullable=False)
-    timestamp = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
+    timestamp = db.Column(db.DateTime(timezone=True), default=now_wib, nullable=False)
 
     sender = db.relationship("User", foreign_keys=[sender_id], backref="sent_messages")
     receiver = db.relationship(
@@ -235,7 +268,7 @@ def fetch_private_messages(other_user_id: int):
             "receiver_id": msg.receiver_id,
             "sender": msg.sender.username,
             "receiver": msg.receiver.username,
-            "content": msg.content,
+            "content": decrypt_message(msg.content),
             "timestamp": msg.timestamp.isoformat(),
         }
         for msg in messages
@@ -254,7 +287,7 @@ def handle_connect():
     logging.info("%s connected to chat", username)
     emit(
         "system",
-        {"message": "Terhubung ke server chat.", "timestamp": utcnow().isoformat()},
+        {"message": "Terhubung ke server chat.", "timestamp": now_wib().isoformat()},
         to=f"user:{user_id}",
     )
 
@@ -283,8 +316,9 @@ def handle_send_message(data):
     if not target_user:
         return
 
+    encrypted_content = encrypt_message(content)
     message = Message(
-        sender_id=user_id, receiver_id=target_id, content=content
+        sender_id=user_id, receiver_id=target_id, content=encrypted_content
     )
     db.session.add(message)
     db.session.commit()

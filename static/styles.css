@@ -19,6 +19,7 @@ body {
 }
 
 .user-item.active {
+  color: #0f172a;
   background: rgba(37, 99, 235, 0.1);
 }
 
